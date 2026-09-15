@@ -169,3 +169,19 @@ def test_dashboard_ui_exposes_monitoring_and_separate_stop_controls(lab):
     assert '停止 Agent' in page
     assert '设备急停' in page
     assert '人工补充' in page
+
+
+def test_unavailable_ollama_keeps_deterministic_plan_and_records_failure(lab, monkeypatch):
+    client, store = lab
+    client.put('/api/settings/model', json={
+        'provider': 'ollama', 'model': 'qwen2.5:1.5b', 'temperature': 0.2, 'max_tokens': 128,
+    })
+    monkeypatch.setattr('labagent.platform.consult', lambda *args: (_ for _ in ()).throw(ConnectionError('offline')))
+
+    task = client.post('/api/tasks', json={'scenario': 'piv', 'objective': 'capture'}).json()
+    store.tick()
+
+    updated = store.read(task['id'])
+    assert updated['status'] == 'planned'
+    assert updated['plan']['planner'] == 'deterministic'
+    assert any(row['event'] == 'model.advice.failed' for row in store.logs(20))

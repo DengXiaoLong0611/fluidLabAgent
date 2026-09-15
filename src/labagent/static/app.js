@@ -36,7 +36,7 @@ function renderDashboard(){
   if(!live.length)active.append(el('p','当前没有运行中的任务','muted'));
   $('provider').value=dashboard.model.provider;$('model-name').value=dashboard.model.model;$('temperature').value=dashboard.model.temperature;$('max-tokens').value=dashboard.model.max_tokens;
   $('temperature-value').value=dashboard.model.temperature;$('max-tokens-value').value=dashboard.model.max_tokens;
-  $('key-state').textContent=dashboard.model.api_key_configured?'服务器已配置 API Key':'服务器未配置该服务商 API Key';
+  $('key-state').textContent=dashboard.model.provider==='ollama'?'本地 Ollama：不需要 API Key':(dashboard.model.api_key_configured?'服务器已配置 API Key':'服务器未配置该服务商 API Key');
   $('usage-detail').replaceChildren(stat('调用次数',dashboard.usage.calls),stat('输入 Token',dashboard.usage.input_tokens),stat('输出 Token',dashboard.usage.output_tokens),stat('平均延迟',dashboard.usage.average_latency_ms+' ms'),stat('估算费用','$'+dashboard.usage.estimated_cost_usd.toFixed(4)));
   renderDeviceHealth();
 }

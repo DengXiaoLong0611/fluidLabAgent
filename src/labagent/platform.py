@@ -5,6 +5,7 @@ import uuid
 from threading import RLock
 from typing import TypedDict
 
+import httpx
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy import (
     JSON,
@@ -15,6 +16,8 @@ from sqlalchemy import (
     create_engine,
     select,
 )
+
+from .model_advisor import consult
 
 SCENARIOS = {"field_generation": "device", "piv": "desktop", "flow_control": "device"}
 
@@ -87,9 +90,22 @@ class Platform:
         templates = {"field_generation": "flap.set", "piv": "davis.capture", "flow_control": "flow.set"}
         task["plan"] = {"tool": templates[task["scenario"]], "parameters": p,
                         "reason": "Validated scenario template", "planner": "deterministic"}
-        if os.getenv("LAB_USE_MODEL") == "1":
-            from .specialist import advise
-            task["plan"]["advice"] = advise(task, self.list("memory")[-5:])
+        settings = self.model_settings()
+        if settings["provider"] != "disabled":
+            try:
+                advice = consult(task, self.list("memory"), settings)
+                task["plan"]["advice"] = advice.content
+                task["plan"]["adviser"] = {"provider": settings["provider"], "model": settings["model"]}
+                self.record_usage(settings["provider"], settings["model"], advice.input_tokens,
+                                  advice.output_tokens, advice.cost_usd, advice.latency_ms)
+                self.log("model.advice.completed", "info", task_id=task["id"],
+                         details={"provider": settings["provider"], "model": settings["model"],
+                                  "latency_ms": advice.latency_ms})
+            except (httpx.HTTPError, ConnectionError, KeyError, TypeError, ValueError) as exc:
+                # The deterministic plan remains safe and usable.
+                self.log("model.advice.failed", "warning", task_id=task["id"],
+                         details={"provider": settings["provider"], "model": settings["model"],
+                                  "error": str(exc)[:300]})
         self.transition(task, "planned")
         self.save("task", task)
         return {}
@@ -324,7 +340,9 @@ class Platform:
         model = {key: value for key, value in model.items() if key != "id"}
         provider_env = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
                         "google": "GOOGLE_API_KEY", "deepseek": "DEEPSEEK_API_KEY"}
-        model["api_key_configured"] = bool(os.getenv(provider_env.get(model["provider"], "")))
+        model["api_key_configured"] = (model["provider"] == "ollama" or bool(
+            os.getenv(provider_env.get(model["provider"], ""))
+        ))
         tasks = self.list("task")
         stops = sorted((op for op in self.list("operation") if op.get("tool") == "system.emergency_stop"),
                        key=lambda op: op["created_at"], reverse=True)[:10]
