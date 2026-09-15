@@ -6,6 +6,9 @@
 
 - 浏览器创建和查看三类任务：翼板造风场、PIV 拍摄、流动控制。
 - LangGraph 按 `检查 -> 规划 -> 派发 -> 等待 -> 评价` 推进任务。
+- 浏览器监控节点状态、耗时、输入输出和错误，支持暂停、继续、人工补充和 Agent 软停止。
+- 设备急停独立于 Agent 停止，通过最高优先级 `STOP` 操作交给 Device Gateway。
+- Dashboard 显示组件心跳、结构化日志、模型设置、Token 和费用估算。
 - SQLite 保存本机数据；部署时可把 `LAB_DATABASE_URL` 换成 PostgreSQL。
 - 模拟模式不连接设备，也能跑完整流程并显示时间序列。
 - bridge 模式让设备电脑或 DaVis 电脑主动领取任务，再回报结果。
@@ -48,4 +51,4 @@ uv run labagent-bridge --kind desktop --adapter rpa --endpoint http://127.0.0.1:
 
 复制 `.env.example` 中需要的变量到终端环境或 `.env`。服务暴露到其他电脑前必须设置 `LAB_API_TOKEN`。启用模型建议还需要 `LAB_USE_MODEL=1`、`LAB_MODEL` 和 `OPENAI_API_KEY`。
 
-更详细的原理和操作说明见 [小白使用与原理说明.md](docs/小白使用与原理说明.md)。
+更详细的原理、代码语法、停止边界和真机接入顺序见 [小白使用与原理说明.md](docs/小白使用与原理说明.md)。

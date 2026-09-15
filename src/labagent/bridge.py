@@ -9,6 +9,9 @@ import httpx
 
 def simulate(op):
     p = op["parameters"]
+    if op["tool"] == "system.emergency_stop":
+        return {"simulated": True, "hardware_stopped": False, "target": p["target"],
+                "message": "STOP was simulated; no physical device was stopped"}
     if op["tool"] == "davis.capture":
         return {"simulated": True, "image_pairs": p["image_pairs"], "captured": False,
                 "message": "Capture workflow simulated; no camera or laser triggered"}
@@ -17,19 +20,27 @@ def simulate(op):
         "message": "Illustrative signal, not a calibrated aerodynamic model", "fan_count_assumption": 600}
 
 
-def serial_execute(op, port):
-    import serial
-
+def serial_command(op):
+    if op["tool"] == "system.emergency_stop":
+        return {"v": 1, "id": op["id"], "command": "STOP",
+                "target": op["parameters"]["target"], "reason": op["parameters"]["reason"]}
     from .api import Parameters
     p = Parameters.model_validate(op["parameters"])
     if op["tool"] not in ("flap.set", "flow.set"):
         raise ValueError("Unsupported serial tool")
+    return {"v": 1, "id": op["id"], "command": "MOVE",
+            "angle_deg": p.angle_deg, "rate_deg_s": p.rate_deg_s}
+
+
+def serial_execute(op, port):
+    import serial
+
+    command = serial_command(op)
     with serial.Serial(port, 115200, timeout=1, write_timeout=2) as device:
         time.sleep(2)
         device.reset_input_buffer()
-        device.write((json.dumps({"v": 1, "id": op["id"], "command": "MOVE",
-            "angle_deg": p.angle_deg, "rate_deg_s": p.rate_deg_s}) + "\n").encode())
-        deadline = time.monotonic() + 40
+        device.write((json.dumps(command) + "\n").encode())
+        deadline = time.monotonic() + (8 if command["command"] == "STOP" else 40)
         while time.monotonic() < deadline:
             raw = device.readline()
             if not raw:
@@ -72,15 +83,23 @@ def main():
         parser.error("rpa requires --kind desktop and --endpoint")
     with httpx.Client(base_url=args.url, timeout=10, headers={"Authorization": "Bearer " + os.getenv("LAB_API_TOKEN", "")}) as client:
         while True:
+            component = "rpa" if args.adapter == "rpa" else "arduino" if args.adapter == "serial" else "device_gateway"
+            client.post(f"/api/heartbeat/{component}", json={"details": {
+                "kind": args.kind, "adapter": args.adapter, "port": args.port, "endpoint": args.endpoint}}).raise_for_status()
             response = client.post(f"/api/bridge/{args.kind}/claim", params={"worker": args.adapter})
             response.raise_for_status()
             op = response.json()
             if op:
-                result = serial_execute(op, args.port) if args.adapter == "serial" else rpa_execute(op, args.endpoint) if args.adapter == "rpa" else simulate(op)
+                try:
+                    result = serial_execute(op, args.port) if args.adapter == "serial" else rpa_execute(op, args.endpoint) if args.adapter == "rpa" else simulate(op)
+                    status = "completed"
+                except Exception as exc:  # noqa: BLE001
+                    status = "failed"
+                    result = {"error": type(exc).__name__, "message": str(exc)[:300]}
                 response = client.post(f"/api/operations/{op['id']}/complete", json={
-                    "receipt": op["receipt"], "status": "completed", "result": result})
+                    "receipt": op["receipt"], "status": status, "result": result})
                 response.raise_for_status()
-                print(json.dumps({"id": op["id"], "status": "completed"}))
+                print(json.dumps({"id": op["id"], "status": status}))
             if args.once:
                 break
             time.sleep(1)

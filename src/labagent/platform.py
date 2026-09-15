@@ -65,9 +65,12 @@ class Platform:
             self.put(c, kind, data)
 
     def create(self, request):
-        task = {"id": str(uuid.uuid4()), **request, "status": "queued", "created_at": time.time(),
-                "events": [{"stage": "queued", "at": time.time()}]}
+        now = time.time()
+        task = {"id": str(uuid.uuid4()), **request, "status": "queued", "control_state": "running",
+                "hardware_stopped": False, "created_at": now, "events": [{"stage": "queued", "at": now}],
+                "interventions": [], "node_runs": []}
         self.save("task", task)
+        self.log("task.created", "info", task_id=task["id"], details={"scenario": task["scenario"]})
         return task
 
     def transition(self, task, status):
@@ -126,20 +129,54 @@ class Platform:
     def tick(self):
         with self.lock:
             for task in self.list("task"):
+                if task.get("control_state", "running") != "running":
+                    continue
                 if task["status"] in ("queued", "planned", "waiting"):
+                    node = {"queued": "plan", "planned": "dispatch", "waiting": "evaluate"}[task["status"]]
+                    started = time.time()
                     try:
                         self.graph.invoke({"task_id": task["id"]})
+                        updated = self.read(task["id"])
+                        ended = time.time()
+                        run_status = "waiting" if node == "evaluate" and updated["status"] == "waiting" else "completed"
+                        prior_runs = updated.setdefault("node_runs", [])
+                        duplicate_wait = (run_status == "waiting" and prior_runs
+                                          and prior_runs[-1]["node"] == node
+                                          and prior_runs[-1]["status"] == "waiting")
+                        if not duplicate_wait:
+                            prior_runs.append({"id": str(uuid.uuid4()), "node": node,
+                                "status": run_status, "started_at": started, "ended_at": ended,
+                                "duration_ms": round((ended - started) * 1000, 3),
+                                "input": {"task_status": task["status"]},
+                                "output": {"task_status": updated["status"]}})
+                            self.save("task", updated)
+                            self.log("graph.node." + run_status, "info", task_id=task["id"],
+                                     details={"node": node, "duration_ms": round((ended - started) * 1000, 3)})
                     # The scheduler must persist an unexpected node failure instead of dying.
                     except Exception as exc:  # noqa: BLE001
                         task = self.read(task["id"])
                         task["result"] = {"error": type(exc).__name__, "message": str(exc)[:300]}
+                        ended = time.time()
+                        task.setdefault("node_runs", []).append({"id": str(uuid.uuid4()), "node": node,
+                            "status": "failed", "started_at": started, "ended_at": ended,
+                            "duration_ms": round((ended - started) * 1000, 3),
+                            "input": {"task_status": task["status"]}, "error": str(exc)[:300]})
                         self.transition(task, "failed")
                         self.save("task", task)
+                        self.log("graph.node.failed", "error", task_id=task["id"],
+                                 details={"node": node, "error": str(exc)[:300]})
 
     def claim(self, kind, worker):
         with self.lock, self.engine.begin() as c:
             rows = c.execute(select(self.rows.c.data).where(self.rows.c.kind == "operation").with_for_update()).all()
             ops = [r[0] for r in rows]
+            # Emergency commands bypass the normal one-operation resource lock.
+            for op in sorted(ops, key=lambda item: item.get("created_at", 0)):
+                if (kind == "device" and op.get("priority") == "critical"
+                        and op["status"] == "queued" and op["mode"] == "bridge"):
+                    op.update(status="running", worker=worker, receipt=str(uuid.uuid4()), deadline=time.time() + 15)
+                    self.put(c, "operation", op)
+                    return op
             # One physical execution at a time per resource kind; unknown blocks reuse.
             if any(o["kind"] == kind and o["status"] in ("running", "unknown") for o in ops):
                 return None
@@ -181,3 +218,121 @@ class Platform:
                     op["status"] = "cancelled"
                     self.put(c, "operation", op)
             return task
+
+    def pause(self, key):
+        with self.lock:
+            task = self.read(key)
+            if not task:
+                raise ValueError("Task not found")
+            if task["status"] not in ("queued", "planned", "waiting"):
+                raise ValueError("Only an active task can be paused")
+            task["control_state"] = "paused"
+            task["events"].append({"stage": "paused", "at": time.time()})
+            self.save("task", task)
+            self.log("task.paused", "warning", task_id=key)
+            return task
+
+    def resume(self, key, message=""):
+        with self.lock:
+            task = self.read(key)
+            if not task:
+                raise ValueError("Task not found")
+            if task.get("control_state") != "paused":
+                raise ValueError("Task is not paused")
+            if message.strip():
+                task.setdefault("interventions", []).append({"message": message.strip(), "at": time.time()})
+            task["control_state"] = "running"
+            task["events"].append({"stage": "resumed", "at": time.time()})
+            self.save("task", task)
+            self.log("task.resumed", "info", task_id=key, details={"message": message.strip()[:300]})
+            return task
+
+    def stop_agent(self, key):
+        with self.lock:
+            task = self.read(key)
+            if not task:
+                raise ValueError("Task not found")
+            if task["status"] not in ("queued", "planned", "waiting"):
+                raise ValueError("Task is already terminal")
+            op = self.read(task.get("operation_id", ""))
+            if op and op["status"] == "queued":
+                op["status"] = "cancelled"
+                self.save("operation", op)
+            task["control_state"] = "stopped"
+            task["hardware_stopped"] = False
+            self.transition(task, "stopped")
+            self.save("task", task)
+            self.log("agent.stopped", "warning", task_id=key)
+            return task
+
+    def emergency_stop(self, target, reason):
+        now = time.time()
+        op = {"id": "emergency:" + str(uuid.uuid4()), "task_id": None, "kind": "device",
+              "status": "queued", "mode": "bridge", "tool": "system.emergency_stop",
+              "priority": "critical", "parameters": {"target": target, "reason": reason},
+              "created_at": now}
+        self.save("operation", op)
+        self.log("device.emergency_stop.requested", "critical", details=op["parameters"])
+        return op
+
+    def heartbeat(self, component, details=None):
+        row = {"id": "heartbeat:" + component, "component": component, "status": "ok",
+               "at": time.time(), "details": details or {}}
+        self.save("heartbeat", row)
+        return row
+
+    def record_usage(self, provider, model, input_tokens, output_tokens, cost_usd, latency_ms):
+        row = {"id": "usage:" + str(uuid.uuid4()), "provider": provider, "model": model,
+               "input_tokens": input_tokens, "output_tokens": output_tokens,
+               "estimated_cost_usd": cost_usd, "latency_ms": latency_ms, "at": time.time()}
+        self.save("usage", row)
+        return row
+
+    def model_settings(self):
+        return self.read("settings:model") or {"id": "settings:model", "provider": "disabled",
+            "model": "deterministic-planner", "temperature": 0, "max_tokens": 2048}
+
+    def update_model_settings(self, settings):
+        row = {"id": "settings:model", **settings}
+        self.save("settings", row)
+        self.log("model.settings.updated", "info", details={"provider": row["provider"], "model": row["model"]})
+        return row
+
+    def log(self, event, level="info", task_id=None, details=None):
+        row = {"id": "log:" + str(uuid.uuid4()), "event": event, "level": level,
+               "task_id": task_id, "details": details or {}, "at": time.time()}
+        self.save("log", row)
+        return row
+
+    def logs(self, limit=100):
+        return sorted(self.list("log"), key=lambda row: row["at"], reverse=True)[:limit]
+
+    def dashboard(self):
+        heartbeats = {row["component"]: row for row in self.list("heartbeat")}
+        components = {name: {"status": "unknown", "message": "尚未收到心跳"}
+                      for name in ("device_gateway", "arduino", "rpa")}
+        components.update({name: {"status": row["status"] if time.time() - row["at"] <= 5 else "stale",
+                                  "last_seen": row["at"],
+                                  "details": row["details"]} for name, row in heartbeats.items()})
+        components["fastapi"] = {"status": "ok"}
+        components["database"] = {"status": "ok", "url": self.engine.url.drivername}
+        components["langgraph"] = {"status": "ok"}
+        usage = self.list("usage")
+        total_input = sum(row["input_tokens"] for row in usage)
+        total_output = sum(row["output_tokens"] for row in usage)
+        model = self.model_settings()
+        model = {key: value for key, value in model.items() if key != "id"}
+        provider_env = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
+                        "google": "GOOGLE_API_KEY", "deepseek": "DEEPSEEK_API_KEY"}
+        model["api_key_configured"] = bool(os.getenv(provider_env.get(model["provider"], "")))
+        tasks = self.list("task")
+        stops = sorted((op for op in self.list("operation") if op.get("tool") == "system.emergency_stop"),
+                       key=lambda op: op["created_at"], reverse=True)[:10]
+        return {"components": components, "model": model,
+                "tasks": {"total": len(tasks), "active": sum(t["status"] in ("queued", "planned", "waiting") for t in tasks),
+                          "paused": sum(t.get("control_state") == "paused" for t in tasks)},
+                "usage": {"calls": len(usage), "input_tokens": total_input, "output_tokens": total_output,
+                          "total_tokens": total_input + total_output,
+                          "estimated_cost_usd": round(sum(row["estimated_cost_usd"] for row in usage), 6),
+                          "average_latency_ms": round(sum(row["latency_ms"] for row in usage) / len(usage), 1) if usage else 0},
+                "emergency_stops": stops}

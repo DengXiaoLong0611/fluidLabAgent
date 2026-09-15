@@ -38,6 +38,26 @@ class Completion(BaseModel):
     result: dict
 
 
+class Intervention(BaseModel):
+    message: str = Field(default="", max_length=1000)
+
+
+class EmergencyStop(BaseModel):
+    target: Literal["all", "rail", "turntable", "flaps", "flow_control"] = "all"
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ModelSettings(BaseModel):
+    provider: Literal["disabled", "openai", "anthropic", "google", "deepseek", "ollama"]
+    model: str = Field(min_length=1, max_length=100)
+    temperature: float = Field(default=0.2, ge=0, le=2)
+    max_tokens: int = Field(default=2048, ge=128, le=32768)
+
+
+class Heartbeat(BaseModel):
+    details: dict = Field(default_factory=dict)
+
+
 def create_app(url=None, run_scheduler=True):
     store = Platform(url or os.getenv("LAB_DATABASE_URL", "sqlite:///labagent.db"))
 
@@ -89,6 +109,51 @@ def create_app(url=None, run_scheduler=True):
             return store.cancel(key)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/tasks/{key}/pause", dependencies=[Depends(auth)])
+    def pause(key: str):
+        try:
+            return store.pause(key)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/tasks/{key}/resume", dependencies=[Depends(auth)])
+    def resume(key: str, body: Intervention):
+        try:
+            return store.resume(key, body.message)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/tasks/{key}/stop-agent", dependencies=[Depends(auth)])
+    def stop_agent(key: str):
+        try:
+            return store.stop_agent(key)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/emergency-stop", dependencies=[Depends(auth)], status_code=202)
+    def emergency_stop(body: EmergencyStop):
+        return store.emergency_stop(body.target, body.reason)
+
+    @app.get("/api/dashboard", dependencies=[Depends(auth)])
+    def dashboard():
+        return store.dashboard()
+
+    @app.get("/api/logs", dependencies=[Depends(auth)])
+    def logs(limit: int = 100):
+        return store.logs(min(max(limit, 1), 500))
+
+    @app.get("/api/settings/model", dependencies=[Depends(auth)])
+    def model_settings():
+        return store.dashboard()["model"]
+
+    @app.put("/api/settings/model", dependencies=[Depends(auth)])
+    def update_model_settings(body: ModelSettings):
+        return store.update_model_settings(body.model_dump(mode="json"))
+
+    @app.post("/api/heartbeat/{component}", dependencies=[Depends(auth)])
+    def heartbeat(component: Literal["device_gateway", "arduino", "rpa"], body: Heartbeat):
+        return store.heartbeat(component, body.details)
 
     @app.get("/api/memories", dependencies=[Depends(auth)])
     def memories():
