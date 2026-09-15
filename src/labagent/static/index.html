@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fluid Lab 工作台</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><header><strong>Fluid Lab <span>实验工作台</span></strong><span id="connection">连接中</span></header>
+<main><section class="composer"><h1>新建实验任务</h1><form id="task-form">
+<label>实验场景<select id="scenario"><option value="field_generation">多风扇 / 翼板造风场</option><option value="piv">PIV 拍摄</option><option value="flow_control">流动控制</option></select></label>
+<label>实验目标<textarea id="objective" required maxlength="1000">检查翼板动作与风速反馈</textarea></label>
+<div class="pair"><label>执行模式<select id="mode"><option value="simulation">本机模拟</option><option value="bridge">等待外部网关</option></select></label><label>API 访问令牌<input id="token" type="password" autocomplete="off" placeholder="本机未设置时留空"></label></div>
+<div id="motion" class="pair"><label>翼板角度 (°)<input id="angle" type="number" min="-30" max="30" step="1" value="5"></label><label>运动速度 (°/s)<input id="rate" type="number" min="0.1" max="10" step="0.1" value="5"></label><label>目标风速 (m/s)<input id="velocity" type="number" min="0" max="20" step="0.1" value="5"></label><label>目标湍流度 (%)<input id="ti" type="number" min="0" max="100" value="10"></label></div>
+<label id="capture" hidden>图像对数量<input id="pairs" type="number" min="1" max="100" value="10"></label>
+<button type="submit" id="submit">提交任务</button><p id="error" role="alert"></p></form></section>
+<section class="workspace"><nav><button id="tasks-tab" class="active">任务记录</button><button id="memory-tab">实验记忆</button><button id="refresh" title="刷新" aria-label="刷新">↻</button></nav>
+<div id="task-view"><div class="table-wrap"><table><thead><tr><th>实验目标</th><th>场景</th><th>模式</th><th>状态</th></tr></thead><tbody id="tasks"></tbody></table></div><p id="empty">暂无任务</p><article id="detail"><h2>任务详情</h2><p>尚未选择任务</p></article></div>
+<div id="memory-view" hidden></div></section></main><script src="/static/app.js"></script></body></html>
